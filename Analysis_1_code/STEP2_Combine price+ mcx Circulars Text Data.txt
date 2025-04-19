@@ -1,0 +1,40 @@
+import pandas as pd
+
+# Take both file paths
+gold_file = input("Enter the full path of the gold prices Excel file:\n")
+mcx_file = input("Enter the full path of the MCX circulars Excel file:\n")
+
+try:
+    # Load gold price data
+    gold_df = pd.read_excel(gold_file, header=0)
+    gold_df['Date'] = pd.to_datetime(gold_df['Date'], errors='coerce')
+    gold_df = gold_df.dropna(subset=['Date'])
+
+    # Load MCX circular data
+    mcx_df = pd.read_excel(mcx_file, header=0)
+    mcx_df['Date'] = pd.to_datetime(mcx_df['Date'], errors='coerce')
+    mcx_df = mcx_df.dropna(subset=['Date'])
+
+    # Show data previews
+    print("\n🟡 Gold Price Data Preview:")
+    print(gold_df.head())
+
+    print("\n📄 MCX Circulars Data Preview:")
+    print(mcx_df.head())
+
+    # Merge both on Date
+    merged_df = pd.merge(gold_df, mcx_df, on='Date', how='inner')
+
+    print("\n✅ Merged Data Preview:")
+    print(merged_df.head())
+
+    print(f"\n📊 Total Merged Rows: {len(merged_df)}")
+
+    # Optional: Save merged data
+    merged_df.to_excel("merged_output.xlsx", index=False)
+    print("\n💾 Merged file saved as 'merged_output.xlsx'.")
+
+except FileNotFoundError:
+    print("\n❌ One of the files was not found. Please check the paths.")
+except Exception as e:
+    print(f"\n❌ Error occurred: {e}")

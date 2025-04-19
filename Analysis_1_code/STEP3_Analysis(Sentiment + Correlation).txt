@@ -1,0 +1,507 @@
+import os
+import re
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from PyPDF2 import PdfReader
+import nltk
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+import datetime
+from dateutil.parser import parse
+import warnings
+from tqdm import tqdm
+import matplotlib.dates as mdates
+
+warnings.filterwarnings('ignore')
+
+# Download NLTK resources
+nltk.download('punkt', quiet=True)
+nltk.download('stopwords', quiet=True)
+nltk.download('vader_lexicon', quiet=True)
+
+class GoldSentimentAnalyzer:
+    def __init__(self):
+        self.sia = SentimentIntensityAnalyzer()
+        # Custom gold-related terms to enhance sentiment analysis
+        self.gold_related_terms = [
+            'gold', 'bullion', 'precious metal', 'carat', 'karat', 'oz', 'ounce', 
+            'troy', 'fineness', 'purity', 'sovereign', 'GDR', 'ETF', 'futures', 
+            'spot gold', 'xau', 'hallmark'
+        ]
+        # Add gold-related terms to the sentiment analyzer's lexicon
+        for term in self.gold_related_terms:
+            self.sia.lexicon[term] = 2.0  # Assign a positive value to identify gold terms
+
+    def extract_circular_info(self, pdf_path):
+        """Extract circular number, date, and text from PDF"""
+        try:
+            # Extract circular number from filename
+            filename = os.path.basename(pdf_path)
+            circular_num_match = re.search(r'(?:circular|circlar)[^\d]*(\d{3})[-\s]*(\d{4})', 
+                                         filename.lower(), re.IGNORECASE)
+            
+            if circular_num_match:
+                circular_num = f"{circular_num_match.group(1)}/{circular_num_match.group(2)}"
+            else:
+                circular_num = None
+                
+            # Extract text
+            reader = PdfReader(pdf_path)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + " "
+            
+            # If circular number not found in filename, try to find in text
+            if not circular_num:
+                circular_pattern = re.search(r'circular\s*no\.?[:\s]*(\d{3})/(\d{4})', 
+                                           text.lower(), re.IGNORECASE)
+                if circular_pattern:
+                    circular_num = f"{circular_pattern.group(1)}/{circular_pattern.group(2)}"
+            
+            # Extract date from text
+            date_patterns = [
+                r'dated\s+(\d{1,2}(?:st|nd|rd|th)?\s+\w+,?\s+\d{4})',
+                r'date\s*:?\s*(\d{1,2}(?:st|nd|rd|th)?\s+\w+,?\s+\d{4})',
+                r'(\d{1,2})[-./](\d{1,2})[-./](\d{2,4})',
+                r'(\w+\s+\d{1,2},?\s+\d{4})'
+            ]
+            
+            extracted_date = None
+            for pattern in date_patterns:
+                date_match = re.search(pattern, text, re.IGNORECASE)
+                if date_match:
+                    date_str = date_match.group(1)
+                    try:
+                        extracted_date = parse(date_str, fuzzy=True).date()
+                        break
+                    except:
+                        continue
+            
+            return {
+                'circular_num': circular_num,
+                'date': extracted_date,
+                'text': text
+            }
+        except Exception as e:
+            print(f"Error processing {pdf_path}: {str(e)}")
+            return None
+
+    def is_gold_related(self, text):
+        """Check if the text is related to gold commodity"""
+        text_lower = text.lower()
+        return any(term in text_lower for term in self.gold_related_terms)
+
+    def extract_gold_paragraphs(self, text):
+        """Extract paragraphs that are related to gold"""
+        paragraphs = text.split('\n\n')
+        gold_paragraphs = []
+        
+        for para in paragraphs:
+            if self.is_gold_related(para):
+                gold_paragraphs.append(para)
+        
+        return ' '.join(gold_paragraphs) if gold_paragraphs else None
+
+    def analyze_sentiment(self, text):
+        """Analyze sentiment of text"""
+        if not text or len(text.strip()) == 0:
+            return {'compound': 0, 'neg': 0, 'neu': 0, 'pos': 0}
+        
+        return self.sia.polarity_scores(text)
+
+    def process_pdfs(self, pdf_folder):
+        """Process all PDFs in the folder and extract relevant information"""
+        results = []
+        
+        # List all PDF files in the folder
+        pdf_files = [f for f in os.listdir(pdf_folder) if f.lower().endswith('.pdf')]
+        
+        print(f"Processing {len(pdf_files)} PDF files...")
+        for pdf_file in tqdm(pdf_files):
+            pdf_path = os.path.join(pdf_folder, pdf_file)
+            info = self.extract_circular_info(pdf_path)
+            
+            if info:
+                # Extract gold-related content
+                gold_text = self.extract_gold_paragraphs(info['text'])
+                
+                if gold_text:
+                    # Analyze sentiment for gold content
+                    sentiment = self.analyze_sentiment(gold_text)
+                    
+                    results.append({
+                        'circular_num': info['circular_num'],
+                        'date': info['date'],
+                        'gold_content': gold_text,
+                        'sentiment_compound': sentiment['compound'],
+                        'sentiment_negative': sentiment['neg'],
+                        'sentiment_neutral': sentiment['neu'],
+                        'sentiment_positive': sentiment['pos'],
+                        'filename': pdf_file
+                    })
+        
+        # Create DataFrame and save the extracted data
+        circulars_df = pd.DataFrame(results)
+        
+        # Print some statistics about the extraction
+        print(f"\nExtraction results:")
+        print(f"- Total PDFs processed: {len(pdf_files)}")
+        print(f"- Gold-related circulars found: {len(circulars_df)}")
+        
+        # Print circular numbers that were successfully extracted
+        if not circulars_df.empty:
+            print(f"- Sample of extracted circular numbers: {circulars_df['circular_num'].dropna().sample(min(5, len(circulars_df))).tolist()}")
+        
+        # Count circulars with missing information
+        missing_circular_num = circulars_df['circular_num'].isna().sum()
+        missing_date = circulars_df['date'].isna().sum()
+        
+        print(f"- Circulars with missing circular number: {missing_circular_num} ({missing_circular_num/len(circulars_df)*100:.1f}%)")
+        print(f"- Circulars with missing date: {missing_date} ({missing_date/len(circulars_df)*100:.1f}%)")
+        
+        return circulars_df
+
+    def merge_with_price_data(self, circulars_df, price_data_path):
+        """Merge circular sentiment data with price data from Excel"""
+        print("\nReading price data file:", price_data_path)
+        # Read price data
+        price_df = pd.read_excel(price_data_path)
+        
+        print(f"Price data columns: {price_df.columns.tolist()}")
+        print(f"Price data sample:\n{price_df.head()}")
+        
+        # Check if "Circular No." column exists in price data
+        if 'Circular No.' in price_df.columns:
+            print("\nMerging by Circular Number...")
+            
+            # Standardize circular number format
+            if 'circular_num' in circulars_df.columns:
+                # Extract just the number part if it's in the format NNN/YYYY
+                circulars_df['circular_num_clean'] = circulars_df['circular_num'].apply(
+                    lambda x: x.split('/')[0] if isinstance(x, str) and '/' in x else x
+                )
+                
+                # Similarly process the price data circular numbers
+                price_df['circular_num_clean'] = price_df['Circular No.'].astype(str).apply(
+                    lambda x: x.split('/')[0] if '/' in x else x
+                )
+                
+                # Print sample of matching circular numbers
+                circulars_set = set(circulars_df['circular_num_clean'].dropna())
+                price_set = set(price_df['circular_num_clean'].dropna())
+                common = circulars_set.intersection(price_set)
+                
+                print(f"- Unique circular numbers in PDF data: {len(circulars_set)}")
+                print(f"- Unique circular numbers in price data: {len(price_set)}")
+                print(f"- Matching circular numbers: {len(common)}")
+                if common:
+                    print(f"- Sample of matching circulars: {list(common)[:5]}")
+                
+                # Merge dataframes based on circular number
+                merged_df = pd.merge(
+                    circulars_df,
+                    price_df[['circular_num_clean', 'Date', 'Price']],
+                    on='circular_num_clean',
+                    how='left'
+                )
+                
+                # Clean up the merged dataframe
+                if 'Date' in merged_df.columns:
+                    merged_df['price_date'] = pd.to_datetime(merged_df['Date']).dt.date
+                
+                merged_df['price'] = merged_df['Price']
+                
+                print(f"\nMerged data has {len(merged_df)} rows")
+                print(f"- Rows with price data: {merged_df['price'].notna().sum()}")
+                
+                return merged_df
+            else:
+                print("Warning: 'circular_num' column not found in circulars data")
+        else:
+            print("Warning: 'Circular No.' column not found in price data")
+            
+            # Try merging by date instead
+            if 'Date' in price_df.columns and 'date' in circulars_df.columns:
+                print("\nTrying to merge by date instead...")
+                
+                # Convert date columns to datetime for proper comparison
+                price_df['Date'] = pd.to_datetime(price_df['Date']).dt.date
+                circulars_df['date'] = pd.to_datetime(circulars_df['date']).dt.date
+                
+                # Merge dataframes based on date
+                merged_df = pd.merge(
+                    circulars_df,
+                    price_df[['Date', 'Price']],
+                    left_on='date',
+                    right_on='Date',
+                    how='left'
+                )
+                
+                merged_df['price'] = merged_df['Price']
+                
+                print(f"\nMerged data has {len(merged_df)} rows")
+                print(f"- Rows with price data: {merged_df['price'].notna().sum()}")
+                
+                return merged_df
+            else:
+                print("Error: Cannot merge data - compatible columns not found")
+                return circulars_df
+
+    def analyze_results(self, merged_df):
+        """Analyze the relationship between sentiment and price changes"""
+        # Filter out rows with missing price data
+        df = merged_df.dropna(subset=['price'])
+        
+        if len(df) < 5:  # Not enough data for meaningful analysis
+            print("Not enough data points with both sentiment and price information.")
+            return {}
+        
+        print(f"\nAnalyzing {len(df)} circulars with both sentiment and price data")
+        
+        # Calculate correlation
+        correlation = df['sentiment_compound'].corr(df['price'])
+        print(f"- Correlation between sentiment and price: {correlation:.3f}")
+        
+        # Group by sentiment (positive, negative, neutral)
+        df['sentiment_category'] = pd.cut(
+            df['sentiment_compound'],
+            bins=[-1.1, -0.1, 0.1, 1.1],
+            labels=['Negative', 'Neutral', 'Positive']
+        )
+        
+        sentiment_grouped = df.groupby('sentiment_category')['price'].agg(['mean', 'count'])
+        print("\nAverage price by sentiment category:")
+        print(sentiment_grouped)
+        
+        return {
+            'correlation': correlation,
+            'sentiment_impact': sentiment_grouped,
+            'data_for_visualization': df
+        }
+
+    def generate_visualizations(self, analysis_results, output_folder="output"):
+        """Generate visualizations of the analysis results"""
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+            
+        if not analysis_results or 'data_for_visualization' not in analysis_results:
+            print("Not enough data for visualizations")
+            return
+            
+        df = analysis_results['data_for_visualization']
+        
+        # 1. Sentiment vs Price Scatter Plot
+        plt.figure(figsize=(10, 6))
+        sns.scatterplot(x='sentiment_compound', y='price', data=df)
+        plt.title('Gold Price vs Circular Sentiment')
+        plt.xlabel('Sentiment Score (Compound)')
+        plt.ylabel('Gold Price')
+        plt.grid(True, alpha=0.3)
+        plt.savefig(os.path.join(output_folder, 'sentiment_vs_price.png'))
+        
+        # 2. Average Price by Sentiment Category
+        plt.figure(figsize=(10, 6))
+        sentiment_impact = analysis_results['sentiment_impact']['mean']
+        counts = analysis_results['sentiment_impact']['count']
+        
+        ax = sentiment_impact.plot(kind='bar', color=['red', 'gray', 'green'])
+        plt.title('Average Gold Price by Circular Sentiment Category')
+        plt.xlabel('Sentiment Category')
+        plt.ylabel('Average Price')
+        plt.grid(True, alpha=0.3)
+        
+        # Add count labels
+        for i, v in enumerate(sentiment_impact):
+            ax.text(i, v + (v*0.01), 
+                    f"n={counts.iloc[i]}", 
+                    ha='center', fontweight='bold')
+            
+        plt.savefig(os.path.join(output_folder, 'avg_price_by_sentiment.png'))
+        
+        # 3. Sentiment Distribution
+        plt.figure(figsize=(10, 6))
+        sns.histplot(df['sentiment_compound'], bins=15, kde=True)
+        plt.title('Distribution of Sentiment Scores in Gold-Related Circulars')
+        plt.xlabel('Sentiment Score')
+        plt.ylabel('Count')
+        plt.grid(True, alpha=0.3)
+        plt.savefig(os.path.join(output_folder, 'sentiment_distribution.png'))
+        
+        # Export data for the visualizations
+        df.to_excel(os.path.join(output_folder, 'gold_sentiment_analysis_data.xlsx'), index=False)
+        
+        print(f"\nVisualizations and data saved to {output_folder} folder")
+
+    def generate_summary_report(self, analysis_results, output_folder="output"):
+        """Generate a comprehensive summary of findings"""
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+            
+        if not analysis_results:
+            print("Not enough data for summary report")
+            return
+            
+        correlation = analysis_results.get('correlation', 'N/A')
+        sentiment_impact = analysis_results.get('sentiment_impact', pd.DataFrame())
+        
+        # Calculate key metrics
+        df = analysis_results.get('data_for_visualization', pd.DataFrame())
+        
+        summary_text = """
+# MCX Gold Circular Sentiment Analysis - Summary Report
+
+## Overview
+This report analyzes the relationship between MCX circular sentiment regarding gold commodity and gold prices.
+
+## Key Findings
+"""
+        # Add correlation information
+        if correlation != 'N/A':
+            if abs(correlation) < 0.2:
+                strength = "weak"
+            elif abs(correlation) < 0.4:
+                strength = "moderate"
+            else:
+                strength = "strong"
+                
+            direction = "positive" if correlation > 0 else "negative"
+            
+            summary_text += f"""
+1. **Sentiment-Price Correlation**: A {strength} {direction} correlation ({correlation:.3f}) was found between circular sentiment and gold prices, suggesting that {'positive sentiment in circulars tends to be associated with higher prices' if correlation > 0 else 'negative sentiment in circulars tends to be associated with lower prices'}.
+"""
+        
+        # Add sentiment impact information
+        if not sentiment_impact.empty:
+            pos_price = sentiment_impact.loc['Positive', 'mean'] if 'Positive' in sentiment_impact.index else 0
+            neg_price = sentiment_impact.loc['Negative', 'mean'] if 'Negative' in sentiment_impact.index else 0
+            neu_price = sentiment_impact.loc['Neutral', 'mean'] if 'Neutral' in sentiment_impact.index else 0
+            
+            summary_text += f"""
+2. **Price by Sentiment Category**: 
+   - For positive sentiment circulars, average gold price was {pos_price:.2f}
+   - For neutral sentiment circulars, average gold price was {neu_price:.2f}
+   - For negative sentiment circulars, average gold price was {neg_price:.2f}
+"""
+            
+            # Determine which sentiment category had the highest price
+            highest = max(
+                [('Positive', pos_price if 'Positive' in sentiment_impact.index else -float('inf')),
+                 ('Neutral', neu_price if 'Neutral' in sentiment_impact.index else -float('inf')),
+                 ('Negative', neg_price if 'Negative' in sentiment_impact.index else -float('inf'))],
+                key=lambda x: x[1]
+            )
+            
+            lowest = min(
+                [('Positive', pos_price if 'Positive' in sentiment_impact.index else float('inf')),
+                 ('Neutral', neu_price if 'Neutral' in sentiment_impact.index else float('inf')),
+                 ('Negative', neg_price if 'Negative' in sentiment_impact.index else float('inf'))],
+                key=lambda x: x[1]
+            )
+            
+            if highest[0] != lowest[0]:
+                summary_text += f"   - {highest[0]} sentiment circulars are associated with the highest average price, while {lowest[0]} sentiment circulars are associated with the lowest.\n"
+        
+        # Add sentiment distribution information
+        if not df.empty:
+            pos_circulars = (df['sentiment_compound'] > 0.1).sum()
+            neg_circulars = (df['sentiment_compound'] < -0.1).sum()
+            neu_circulars = ((df['sentiment_compound'] >= -0.1) & (df['sentiment_compound'] <= 0.1)).sum()
+            total = len(df)
+            
+            summary_text += f"""
+3. **Circular Sentiment Distribution**:
+   - Positive sentiment circulars: {pos_circulars} ({pos_circulars/total*100:.1f}%)
+   - Neutral sentiment circulars: {neu_circulars} ({neu_circulars/total*100:.1f}%)
+   - Negative sentiment circulars: {neg_circulars} ({neg_circulars/total*100:.1f}%)
+"""
+        
+        # Add conclusion
+        summary_text += """
+## Conclusion
+"""
+        if correlation != 'N/A':
+            if abs(correlation) > 0.3:
+                summary_text += """
+The analysis reveals a meaningful relationship between MCX gold circular sentiment and gold prices. This suggests that sentiment analysis of circulars could provide valuable insights for gold trading and investment decisions.
+"""
+            else:
+                summary_text += """
+While there appears to be some relationship between MCX gold circular sentiment and gold prices, the correlation is not strong enough to be used as a standalone indicator. It might be more valuable when combined with other technical and fundamental analysis methods.
+"""
+        
+        # Add limitations
+        summary_text += """
+## Limitations
+1. The analysis is based on the available set of circulars and may not capture all market influences.
+2. Standard sentiment analysis may not fully capture the nuanced and technical language used in MCX circulars.
+3. Gold prices are influenced by numerous global factors beyond MCX circulars.
+4. Correlation does not necessarily imply causation - the relationship between circular sentiment and prices may be influenced by other factors.
+"""
+        
+        # Write to file
+        with open(os.path.join(output_folder, 'summary_report.md'), 'w') as f:
+            f.write(summary_text)
+            
+        print(f"\nSummary report saved to {output_folder}/summary_report.md")
+
+
+def main():
+    print("=" * 50)
+    print("MCX Gold Circular Sentiment Analysis Tool")
+    print("=" * 50)
+    
+    # Get input paths
+    pdf_folder = input("Enter the path to the folder containing MCX PDF circulars: ")
+    price_data_path = input("Enter the path to the Excel file with gold price data: ")
+    
+    # Validate inputs
+    if not os.path.isdir(pdf_folder):
+        print(f"Error: The specified PDF folder '{pdf_folder}' does not exist.")
+        return
+        
+    if not os.path.isfile(price_data_path) or not price_data_path.lower().endswith('.xlsx'):
+        print(f"Error: The specified price data file '{price_data_path}' does not exist or is not an Excel file.")
+        return
+    
+    # Set up output folder
+    output_folder = "mcx_gold_analysis_output"
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+    
+    # Initialize the analyzer
+    analyzer = GoldSentimentAnalyzer()
+    
+    # Process PDFs
+    print("\nStep 1: Processing PDF circulars...")
+    circulars_df = analyzer.process_pdfs(pdf_folder)
+    circulars_df.to_excel(os.path.join(output_folder, "gold_circulars_extracted.xlsx"), index=False)
+    
+    # Merge with price data
+    print("\nStep 2: Merging with gold price data...")
+    merged_df = analyzer.merge_with_price_data(circulars_df, price_data_path)
+    merged_df.to_excel(os.path.join(output_folder, "gold_circulars_with_price_data.xlsx"), index=False)
+    
+    # Analyze results
+    print("\nStep 3: Analyzing relationship between sentiment and prices...")
+    analysis_results = analyzer.analyze_results(merged_df)
+    
+    # Generate visualizations
+    print("\nStep 4: Generating visualizations...")
+    analyzer.generate_visualizations(analysis_results, output_folder)
+    
+    # Generate summary report
+    print("\nStep 5: Generating summary report...")
+    analyzer.generate_summary_report(analysis_results, output_folder)
+    
+    print("\nAnalysis complete! All results are saved in the", output_folder, "folder.")
+    print("\nAvailable output files:")
+    print("1. gold_circulars_extracted.xlsx - Raw extracted data from circulars")
+    print("2. gold_circulars_with_price_data.xlsx - Merged circular and price data")
+    print("3. gold_sentiment_analysis_data.xlsx - Complete data used for analysis")
+    print("4. Various visualization PNG files")
+    print("5. summary_report.md - Comprehensive analysis findings")
+
+
+if __name__ == "__main__":
+    main()
